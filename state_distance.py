@@ -203,7 +203,11 @@ class SimpleContrastiveStateDistanceModel:
         self._representation_net.eval()
         reprs = self._representation_net(obs).detach().cpu().numpy()
         self._repr_mean = reprs.mean(axis=0)
-        self._repr_std = reprs.std(axis=0) + 1e-8
+        std = reprs.std(axis=0)
+        # To prevent P2 collapses of some dimensions: std becomes tiny -> z-score explodes ->
+        # sign hashing becomes unstable
+        std = np.maximum(std, 1e-3)
+        self._repr_std = std
 
     @torch.no_grad()
     def get_representation(self, obs):
@@ -214,6 +218,7 @@ class SimpleContrastiveStateDistanceModel:
 
         if self._normalize_representations and (self._repr_mean is not None):
             reprs = (reprs - self._repr_mean) / self._repr_std
+            reprs /= (np.linalg.norm(reprs) + 1e-8)
         return reprs
 
     def save(self, dname):

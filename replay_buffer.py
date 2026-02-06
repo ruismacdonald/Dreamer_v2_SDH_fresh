@@ -74,6 +74,7 @@ class ReplayBuffer:
         self.loca_indices_flat = []  # list of currently-kept idx (unique)
         self.flat_pos = np.full(self.size, -1, dtype=np.int64)  # idx -> position in loca_indices_flat
         self.insert_id = np.zeros(self.size, dtype=np.int64)  # generation stamp per slot
+        self.slot_key = [None] * self.size  # current hash key per ring slot
         self._global_insert_id = 0
 
         # SimHash-bucketed state
@@ -113,6 +114,14 @@ class ReplayBuffer:
         self.flat_pos[last_idx] = pos
         self.loca_indices_flat.pop()
         self.flat_pos[idx] = -1
+
+    def _invalidate_slot_membership(self, i: int):
+        # If the slot was previously "kept", drop it (we'll re-add if the new transition is kept)
+        if self.flat_pos[i] != -1:
+            self._flat_remove(i)
+
+        # Clear previous key mapping (optional; we overwrite below)
+        self.slot_key[i] = None
 
     # SimHash helpers
     def _ensure_simhash_matrix(self, rep: np.ndarray) -> None:
@@ -167,6 +176,11 @@ class ReplayBuffer:
         """
         i = self.idx
 
+        if self.distance_process:
+            # Overwriting slot i due to circular replay: remove stale kept-start membership; we'll 
+            # re-add for the new transition (kept-start mirrors reward_mask).
+            self._invalidate_slot_membership(i)
+
         # Write to global ring (always)
         self.observations[i] = obs["image"]
         self.actions[i] = action
@@ -188,6 +202,7 @@ class ReplayBuffer:
             self.insert_id[i] = self._global_insert_id
 
             key = self._simhash_key(rep)
+            self.slot_key[i] = key
             fifo = self._get_fifo(key)
 
             # Ensure this new idx is eligible as a START index

@@ -429,16 +429,18 @@ class Dreamer:
 
         return posterior, action
 
-    def act_and_collect_data(self, env, collect_steps):
-
+    def act_and_collect_data(self, env, collect_steps, return_obs=False):
         obs = env.reset()
         done = False
         prev_state = self.rssm.init_state(1, self.device)
         prev_action = torch.zeros(1, self.action_size).to(self.device)
 
         episode_rewards = [0.0]
+        obs_list = [] if return_obs else None
 
-        for i in range(collect_steps):
+        for i in range(int(collect_steps)):
+            if return_obs:
+                obs_list.append(obs["image"].copy())
 
             with torch.no_grad():
                 posterior, action = self.act_with_world_model(
@@ -446,13 +448,13 @@ class Dreamer:
                 )
             action = action[0].cpu().numpy()
             next_obs, rew, done, _ = env.step(action)
+
             rep = None
             if self.loca_state_distance:
                 img = to_bchw(obs["image"]).to(self.device)
                 rep = self.state_distance_model.get_representation(preprocess_obs(img))
 
             self.data_buffer.add(obs, action, rew, done, rep)
-
             episode_rewards[-1] += rew
 
             if done:
@@ -471,6 +473,8 @@ class Dreamer:
                     .unsqueeze(0)
                 )
 
+        if return_obs:
+            return np.array(episode_rewards), obs_list
         return np.array(episode_rewards)
 
     def evaluate(self, env, eval_episodes, render=False):
@@ -908,6 +912,12 @@ def main():
                 loca_phase = "phase_2"
                 train_env = make_env(args, loca_phase, "train")
                 test_env = make_env(args, loca_phase, "eval")
+                _, phase2_obs = dreamer.act_and_collect_data(train_env, collect_steps=3e5, return_obs=True)
+                phase2_data = {
+                    "observation": (np.stack(phase2_obs).astype(np.float32) / 255.0 - 0.5),
+                    "terminal": np.zeros((len(phase2_obs),), dtype=np.float32),
+                }
+                dreamer.state_distance_model.learn_representation_stats(phase2_data)
 
                 # Recompute logdir + logger here so phase_2 results save in phase_2 dir
                 logdir = os.path.join(data_path, args.exp_name, str(args.seed), loca_phase)
