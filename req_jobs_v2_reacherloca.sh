@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=dreamer_reacherloca_v2_state_dist
+#SBATCH --job-name=dreamer_v2_sdh_r
 #SBATCH --account=def-rsdjjana
 #SBATCH --time=6-23:59:59
 #SBATCH --gres=gpu:1
@@ -68,7 +68,7 @@ export LOCA_DATALOADER_WORKERS=0
 : "${SLURM_TMPDIR:=/tmp}"
 SEED="${SLURM_ARRAY_TASK_ID}"
 
-RUN_DIR="${SLURM_TMPDIR}/dreamer-v2-state_dist-${SLURM_JOB_ID:-0}-${SEED}"
+RUN_DIR="${SLURM_TMPDIR}/dreamer-v2-sdh-r-${SLURM_JOB_ID:-0}-${SEED}"
 FINAL_DIR="${BASE_SAVE_DIR}/${SEED}"
 mkdir -p "$RUN_DIR" "$FINAL_DIR"
 
