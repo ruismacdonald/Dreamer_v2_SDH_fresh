@@ -303,6 +303,8 @@ class ReplayBuffer:
                 "max": int(np.max(fifo_sizes)) if fifo_sizes else 0,
                 "mean": float(np.mean(fifo_sizes)) if fifo_sizes else 0.0,
             },
+            "reward_mask_sum_global": float(self.reward_mask.sum()),
+            "reward_mask_mean_global": float(self.reward_mask.mean()),
         }
 
     def get_data(self):
