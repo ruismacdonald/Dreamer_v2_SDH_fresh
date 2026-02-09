@@ -1,7 +1,5 @@
-from html import parser
 import os
 import random
-import time
 import argparse
 import numpy as np
 
@@ -77,6 +75,10 @@ class Dreamer:
         self.device = device
         self.restore = args.restore
         self.restore_path = args.checkpoint_path
+
+        self._p2_repstats_target = int(1e5)
+        self._p2_repstats_seen = 0
+        self._p2_repstats_finalized = False
 
         self.loca_state_distance = loca_state_distance
         self.state_distance_model = None
@@ -441,27 +443,35 @@ class Dreamer:
         imgs, trans = [], []
         
         def flush():
+            assert self.state_distance_model is not None
+            
             if len(imgs) == 0:
                 return
-            img_t = torch.as_tensor(np.stack(imgs), device=self.device).float()  # (B,3,64,64)
-            # Only permute if it's HWC
+
+            img_t = torch.as_tensor(np.stack(imgs), device=self.device).float()
             if img_t.ndim == 4 and img_t.shape[-1] in (1, 3):
                 img_t = img_t.permute(0, 3, 1, 2)
             img_t = img_t / 255.0 - 0.5
 
-            if collect_rep_stats and (self.state_distance_model is not None):
-                # Update streaming rep stats from the SAME batches we already process.
-                self.state_distance_model.update_representation_stats_accum(img_t)
-
-            reps_t = self.state_distance_model.get_representation_torch(img_t)  # (B,D) GPU
+            # Compute reps/keys/add transitions FIRST (uses current stats)
+            reps_t = self.state_distance_model.get_representation_torch(img_t)  # (B,D)
             self.data_buffer._ensure_simhash_matrix(reps_t)
-            keys_t = self.data_buffer._simhash_key_u32(reps_t, self.data_buffer.A_latent_t)  # (B,) GPU
-            keys = keys_t.cpu().tolist()  # python ints
+            keys_t = self.data_buffer._simhash_key_u32(reps_t, self.data_buffer.A_latent_t)
+            keys = keys_t.cpu().tolist()
 
             for (obs, action, reward, done), k in zip(trans, keys):
                 self.data_buffer.add(obs, action, reward, done, key_u32=k)
 
-            imgs.clear(); trans.clear()
+            # Update accumulator + maybe finalize AFTER (so this batch still used p1 stats)
+            if collect_rep_stats and (not self._p2_repstats_finalized):
+                self.state_distance_model.update_representation_stats_accum(img_t)
+                self._p2_repstats_seen += img_t.shape[0]
+                if self._p2_repstats_seen >= self._p2_repstats_target:
+                    self.state_distance_model.finalize_representation_stats_accum(clamp_std=1e-3)
+                    self._p2_repstats_finalized = True
+
+            imgs.clear()
+            trans.clear()
             
         for i in range(int(collect_steps)):
             if return_obs:
@@ -495,7 +505,8 @@ class Dreamer:
                 prev_state = posterior
                 prev_action = torch.tensor(action, device=self.device, dtype=torch.float32).unsqueeze(0)
 
-        flush()
+        if self.loca_state_distance:
+            flush()
 
         if return_obs:
             return np.array(episode_rewards), obs_list
@@ -862,8 +873,8 @@ def main():
             
             state_distance_model.train(dreamer.data_buffer.get_data(), args.seed)
             print("normalize:", state_distance_model._normalize_representations,
-                  "mean set:", state_distance_model._repr_mean is not None,
-                  "std set:", state_distance_model._repr_std is not None)
+                  "mean_t set:", state_distance_model._repr_mean_t is not None,
+                  "std_t set:", state_distance_model._repr_std_t is not None)
 
             ckpt_dir = os.path.join(logdir, "ckpts/")
             if not (os.path.exists(ckpt_dir)):
@@ -938,19 +949,14 @@ def main():
                 test_env = make_env(args, loca_phase, "eval")
                 
                 # Start streaming stats accumulation for p2 reps
+                # For the first 1e5 p2 samples, normalization uses p1 _repr_mean_t/_repr_std_t 
+                # while you accumulate p2 stats into _repr_stat_*.
+                # After 1e5 p2 samples, finalize_representation_stats_accum() is called which 
+                # updates _repr_mean_t/_repr_std_t using accumualted p2 stats.   
                 dreamer.state_distance_model.reset_representation_stats_accum()
-
-                # Collect 3e5 steps while updating stats in flush batches (no giant arrays)
-                _ = dreamer.act_and_collect_data(
-                    train_env,
-                    collect_steps=1e5,
-                    return_obs=False,
-                    collect_rep_stats=True,
-                )
-
-                # Finalize stats and start using them for normalization going forward
-                dreamer.state_distance_model.finalize_representation_stats_accum(clamp_std=1e-3)
-
+                dreamer._p2_repstats_seen = 0
+                dreamer._p2_repstats_finalized = False
+                
                 # Recompute logdir + logger here so phase_2 results save in phase_2 dir
                 logdir = os.path.join(data_path, args.exp_name, str(args.seed), loca_phase)
                 os.makedirs(logdir, exist_ok=True)
@@ -975,8 +981,9 @@ def main():
             for _ in range(args.update_steps):
                 model_loss, actor_loss, value_loss, model_loss_terms, rew_loss_stats, rew_stats= dreamer.train_one_batch()
 
+            collect_rep_stats = (loca_phase == "phase_2") and (not dreamer._p2_repstats_finalized)
             train_rews = dreamer.act_and_collect_data(
-                train_env, args.collect_steps // args.action_repeat
+                train_env, args.collect_steps // args.action_repeat, collect_rep_stats=collect_rep_stats
             )
 
             logs.update(

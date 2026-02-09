@@ -259,10 +259,6 @@ class SimpleContrastiveStateDistanceModel:
         self._repr_mean_t = mean.to(self._device)
         self._repr_std_t  = std.to(self._device)
 
-        # Optional CPU copies for saving/debug
-        self._repr_mean = mean.detach().cpu().numpy()
-        self._repr_std  = std.detach().cpu().numpy()
-
     @torch.no_grad()
     def learn_representation_stats(self, data, batch_size: int = 256):
         """
@@ -285,13 +281,19 @@ class SimpleContrastiveStateDistanceModel:
 
         self.finalize_representation_stats_accum()
 
+    def has_rep_stats(self) -> bool:
+        return (self._repr_mean_t is not None) and (self._repr_std_t is not None)
+
     @torch.no_grad()
     def get_representation_torch(self, obs_bchw: torch.Tensor) -> torch.Tensor:
         # obs_bchw: (B,C,H,W) float32 on device
         self._representation_net.eval()
         reps = self._representation_net(obs_bchw)
 
-        if self._normalize_representations and (self._repr_mean_t is not None):
+        if self._normalize_representations:
+            assert self.has_rep_stats(), (
+                "normalize_representations=True but repr stats not set, call train()->learn_representation_stats() or finalize_representation_stats_accum()."
+            )
             reps = (reps - self._repr_mean_t) / self._repr_std_t
             reps = reps / (reps.norm(dim=-1, keepdim=True) + 1e-8)
 
