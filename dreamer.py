@@ -448,7 +448,7 @@ class Dreamer:
             if len(imgs) == 0:
                 return
 
-            img_t = torch.as_tensor(np.stack(imgs), device=self.device).float()
+            img_t = torch.from_numpy(np.stack(imgs)).to(self.device).float()
             if img_t.ndim == 4 and img_t.shape[-1] in (1, 3):
                 img_t = img_t.permute(0, 3, 1, 2)
             img_t = img_t / 255.0 - 0.5
@@ -456,6 +456,7 @@ class Dreamer:
             # Compute reps/keys/add transitions FIRST (uses current stats)
             reps_t = self.state_distance_model.get_representation_torch(img_t)  # (B,D)
             self.data_buffer._ensure_simhash_matrix(reps_t)
+            assert img_t.dtype == torch.float32 and img_t.min() >= -0.6 and img_t.max() <= 0.6
             keys_t = self.data_buffer._simhash_key_u32(reps_t, self.data_buffer.A_latent_t)
             keys = keys_t.cpu().tolist()
 
@@ -486,8 +487,9 @@ class Dreamer:
             episode_rewards[-1] += rew
 
             if self.loca_state_distance:
-                imgs.append(obs["image"].copy())
-                trans.append((obs, action, rew, done))
+                img = obs["image"].copy()
+                imgs.append(img)
+                trans.append(({"image": img}, action, rew, done))
                 if len(imgs) == B:
                     flush()
             else:
