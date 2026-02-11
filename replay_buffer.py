@@ -149,7 +149,6 @@ class ReplayBuffer:
         bits = (dots >= 0).to(torch.int64)  # (B, 32) in {0,1}
 
         # bit 0 = least significant bit (LSB) (matches "little" convention)
-        assert self.hash_bits == 32, "key_u32 packing only supports 32 bits right now"
         weights = (1 << torch.arange(32, device=rep_t.device, dtype=torch.int64))  # (32,)
         keys = (bits * weights).sum(dim=-1)  # (B,) int64, values < 2^32
         return keys
@@ -309,16 +308,14 @@ class ReplayBuffer:
         }
 
     def get_data(self):
-        N = self.size if self.full else self.idx
-        observations =  torch.as_tensor(self.observations[:N].copy().astype(np.float32))
+        observations = torch.as_tensor(self.observations[: self.idx].copy().astype(np.float32))
         # uint8 [0,255] -> float32 [-0.5, 0.5]
         observations = observations.to(torch.float32) / 255.0 - 0.5
         observations = observations.detach().cpu().numpy()
-        terminals = self.terminals[:N].copy()
 
         data = {
             "observation": observations,
-            "terminal": terminals,
+            "terminal": self.terminals[: self.idx].copy(),
         }
         if self.distance_process:
             data.update({"loca_indices_flat": self.loca_indices_flat.copy()})

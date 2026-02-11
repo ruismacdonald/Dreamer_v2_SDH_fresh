@@ -125,13 +125,8 @@ class SimpleContrastiveStateDistanceModel:
         self._batch_size = int(batch_size)
 
         self._normalize_representations = bool(normalize_representations)
-        self._repr_mean_t = None
-        self._repr_std_t = None
-
-        # Streaming stats accumulator (Welford over reps)
-        self._repr_stat_count = 0
-        self._repr_stat_mean_t = None
-        self._repr_stat_M2_t = None
+        self._repr_mean = None
+        self._repr_std = None
 
     def prepare_train_loader(self, data, seed):
         observation_pairs = []
@@ -196,108 +191,34 @@ class SimpleContrastiveStateDistanceModel:
         self.learn_representation_stats(buffer_data)
 
     @torch.no_grad()
-    def reset_representation_stats_accum(self) -> None:
-        """Reset streaming (Welford) accumulator for rep mean/std."""
-        self._repr_stat_count = 0
-        self._repr_stat_mean_t = None
-        self._repr_stat_M2_t = None
-
-    @torch.no_grad()
-    def update_representation_stats_accum(self, obs_bchw: torch.Tensor) -> None:
-        """
-        Update rep mean/var accumulator from a batch of observations.
-
-        obs_bchw: (B,C,H,W) float32 on device, already preprocessed to [-0.5,0.5]
-        """
+    def learn_representation_stats(self, data):
+        """Compute mean/std of representations for normalization."""
         if not self._normalize_representations:
             return
+
+        obs = torch.as_tensor(data["observation"], device=self._device).float()
+        if obs.ndim == 4 and obs.shape[-1] in (1, 3):
+            obs = obs.permute(0, 3, 1, 2)
 
         self._representation_net.eval()
+        reprs = self._representation_net(obs).detach().cpu().numpy()
+        self._repr_mean = reprs.mean(axis=0)
+        std = reprs.std(axis=0)
+        # To prevent P2 collapses of some dimensions: std becomes tiny -> z-score explodes ->
+        # sign hashing becomes unstable
+        std = np.maximum(std, 1e-3)
+        self._repr_std = std
 
-        reps = self._representation_net(obs_bchw)  # (B, D)
-        reps = reps.detach()
-
-        b = int(reps.shape[0])
-        if b == 0:
-            return
-
-        batch_mean = reps.mean(dim=0)                 # (D,)
-        # population var (unbiased=False) to match your existing usage
-        batch_var = reps.var(dim=0, unbiased=False)   # (D,)
-
-        if self._repr_stat_mean_t is None:
-            self._repr_stat_mean_t = batch_mean
-            self._repr_stat_M2_t = batch_var * b
-            self._repr_stat_count = b
-        else:
-            count = self._repr_stat_count
-            new_count = count + b
-
-            delta = batch_mean - self._repr_stat_mean_t
-            self._repr_stat_mean_t = self._repr_stat_mean_t + delta * (b / new_count)
-            self._repr_stat_M2_t = (
-                self._repr_stat_M2_t
-                + batch_var * b
-                + (delta * delta) * (count * b / new_count)
-            )
-            self._repr_stat_count = new_count
-
-    @torch.no_grad()
-    def finalize_representation_stats_accum(self, clamp_std: float = 1e-3) -> None:
-        """Finalize streaming accumulator into self._repr_mean/_repr_std (+ torch copies)."""
-        if not self._normalize_representations:
-            return
-        if self._repr_stat_mean_t is None or self._repr_stat_count <= 0:
-            return
-
-        var = self._repr_stat_M2_t / max(int(self._repr_stat_count), 1)
-        std = torch.sqrt(var)
-        std = torch.clamp(std, min=clamp_std)
-
-        mean = self._repr_stat_mean_t
-
-        self._repr_mean_t = mean.to(self._device)
-        self._repr_std_t  = std.to(self._device)
-
-    @torch.no_grad()
-    def learn_representation_stats(self, data, batch_size: int = 256):
-        """
-        Compute stats (mean, std) from an in-memory dataset.
-        Prefer streaming (reset/update/finalize) during collection to avoid OOM.
-        """
-        if not self._normalize_representations:
-            return
-
-        obs_np = data["observation"]
-        N = obs_np.shape[0]
-
-        self.reset_representation_stats_accum()
-        for s in range(0, N, batch_size):
-            batch = torch.as_tensor(obs_np[s:s+batch_size], device=self._device).float()
-            if batch.ndim == 4 and batch.shape[-1] in (1, 3):
-                batch = batch.permute(0, 3, 1, 2)
-            # assume batch is already in [-0.5,0.5] if you passed it that way
-            self.update_representation_stats_accum(batch)
-
-        self.finalize_representation_stats_accum()
-
-    def has_rep_stats(self) -> bool:
-        return (self._repr_mean_t is not None) and (self._repr_std_t is not None)
+        self._repr_mean_t = torch.as_tensor(self._repr_mean, device=self._device, dtype=torch.float32)
+        self._repr_std_t  = torch.as_tensor(self._repr_std,  device=self._device, dtype=torch.float32)
 
     @torch.no_grad()
     def get_representation_torch(self, obs_bchw: torch.Tensor) -> torch.Tensor:
-        assert obs_bchw.dtype == torch.float32
-        assert obs_bchw.ndim == 4  # BCHW
-        assert obs_bchw.min() >= -0.6 and obs_bchw.max() <= 0.6
-
         # obs_bchw: (B,C,H,W) float32 on device
         self._representation_net.eval()
         reps = self._representation_net(obs_bchw)
 
-        if self._normalize_representations:
-            assert self.has_rep_stats(), (
-                "normalize_representations=True but repr stats not set, call train()->learn_representation_stats() or finalize_representation_stats_accum()."
-            )
+        if self._normalize_representations and (self._repr_mean_t is not None):
             reps = (reps - self._repr_mean_t) / self._repr_std_t
             reps = reps / (reps.norm(dim=-1, keepdim=True) + 1e-8)
 

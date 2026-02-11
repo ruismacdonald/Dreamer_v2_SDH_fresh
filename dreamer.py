@@ -1,5 +1,7 @@
+from html import parser
 import os
 import random
+import time
 import argparse
 import numpy as np
 
@@ -75,10 +77,6 @@ class Dreamer:
         self.device = device
         self.restore = args.restore
         self.restore_path = args.checkpoint_path
-
-        self._p2_repstats_target = int(1e5)
-        self._p2_repstats_seen = 0
-        self._p2_repstats_finalized = False
 
         self.loca_state_distance = loca_state_distance
         self.state_distance_model = None
@@ -430,7 +428,7 @@ class Dreamer:
 
         return posterior, action
 
-    def act_and_collect_data(self, env, collect_steps, return_obs=False, collect_rep_stats=False):
+    def act_and_collect_data(self, env, collect_steps, return_obs=False):
         obs = env.reset()
         done = False
         prev_state = self.rssm.init_state(1, self.device)
@@ -443,36 +441,23 @@ class Dreamer:
         imgs, trans = [], []
         
         def flush():
-            assert self.state_distance_model is not None
-            
             if len(imgs) == 0:
                 return
-
-            img_t = torch.from_numpy(np.stack(imgs)).to(self.device).float()
+            img_t = torch.as_tensor(np.stack(imgs), device=self.device).float()  # (B,3,64,64)
+            # Only permute if it's HWC
             if img_t.ndim == 4 and img_t.shape[-1] in (1, 3):
                 img_t = img_t.permute(0, 3, 1, 2)
             img_t = img_t / 255.0 - 0.5
 
-            # Compute reps/keys/add transitions FIRST (uses current stats)
-            reps_t = self.state_distance_model.get_representation_torch(img_t)  # (B,D)
+            reps_t = self.state_distance_model.get_representation_torch(img_t)  # (B,D) GPU
             self.data_buffer._ensure_simhash_matrix(reps_t)
-            assert img_t.dtype == torch.float32 and img_t.min() >= -0.6 and img_t.max() <= 0.6
-            keys_t = self.data_buffer._simhash_key_u32(reps_t, self.data_buffer.A_latent_t)
-            keys = keys_t.cpu().tolist()
+            keys_t = self.data_buffer._simhash_key_u32(reps_t, self.data_buffer.A_latent_t)  # (B,) GPU
+            keys = keys_t.cpu().tolist()  # python ints
 
             for (obs, action, reward, done), k in zip(trans, keys):
                 self.data_buffer.add(obs, action, reward, done, key_u32=k)
 
-            # Update accumulator + maybe finalize AFTER (so this batch still used p1 stats)
-            if collect_rep_stats and (not self._p2_repstats_finalized):
-                self.state_distance_model.update_representation_stats_accum(img_t)
-                self._p2_repstats_seen += img_t.shape[0]
-                if self._p2_repstats_seen >= self._p2_repstats_target:
-                    self.state_distance_model.finalize_representation_stats_accum(clamp_std=1e-3)
-                    self._p2_repstats_finalized = True
-
-            imgs.clear()
-            trans.clear()
+            imgs.clear(); trans.clear()
             
         for i in range(int(collect_steps)):
             if return_obs:
@@ -487,9 +472,8 @@ class Dreamer:
             episode_rewards[-1] += rew
 
             if self.loca_state_distance:
-                img = obs["image"].copy()
-                imgs.append(img)
-                trans.append(({"image": img}, action, rew, done))
+                imgs.append(obs["image"].copy())
+                trans.append((obs, action, rew, done))
                 if len(imgs) == B:
                     flush()
             else:
@@ -507,8 +491,7 @@ class Dreamer:
                 prev_state = posterior
                 prev_action = torch.tensor(action, device=self.device, dtype=torch.float32).unsqueeze(0)
 
-        if self.loca_state_distance:
-            flush()
+        flush()
 
         if return_obs:
             return np.array(episode_rewards), obs_list
@@ -548,63 +531,22 @@ class Dreamer:
         return episode_rew, np.array(video_images[: self.args.max_videos_to_save])
 
     def collect_random_episodes(self, env, seed_steps):
+
         obs = env.reset()
         done = False
         seed_episode_rews = [0.0]
-
-        if not self.loca_state_distance:
-            # plain buffer path
-            for i in range(seed_steps):
-                action = env.action_space.sample()
-                next_obs, rew, done, _ = env.step(action)
-                self.data_buffer.add(obs, action, rew, done)
-                seed_episode_rews[-1] += rew
-                if done:
-                    obs = env.reset()
-                    if i != seed_steps - 1:
-                        seed_episode_rews.append(0.0)
-                    done = False
-                else:
-                    obs = next_obs
-            return np.array(seed_episode_rews)
-
-        # AE path: batch like act_and_collect_data
-        B = 64
-        imgs, trans = [], []
-
-        def flush():
-            if len(imgs) == 0:
-                return
-            img_t = torch.from_numpy(np.stack(imgs)).to(self.device).float()
-            if img_t.ndim == 4 and img_t.shape[-1] in (1, 3):
-                img_t = img_t.permute(0, 3, 1, 2)
-            img_t = img_t / 255.0 - 0.5
-
-            with torch.no_grad():
-                reps_t = self.state_distance_model.get_representation_torch(img_t)  # (B,D)
-                self.data_buffer._ensure_simhash_matrix(reps_t)
-                keys_t = self.data_buffer._simhash_key_u32(reps_t, self.data_buffer.A_latent_t)
-                keys = keys_t.cpu().tolist()
-
-            for (o, a, r, d), k in zip(trans, keys):
-                self.data_buffer.add(o, a, r, d, key_u32=k)
-
-            imgs.clear()
-            trans.clear()
 
         for i in range(seed_steps):
             action = env.action_space.sample()
             next_obs, rew, done, _ = env.step(action)
 
-            img = obs["image"].copy()
-            imgs.append(img)
-            trans.append(({"image": img}, action, rew, done))
-
-            if len(imgs) == B:
-                flush()
-
+            rep = None
+            if self.loca_state_distance:
+                img = to_bchw(obs["image"]).to(self.device)
+                rep = self.state_distance_model.get_representation_torch(preprocess_obs(img))
+                
+            self.data_buffer.add(obs, action, rew, done, rep)
             seed_episode_rews[-1] += rew
-
             if done:
                 obs = env.reset()
                 if i != seed_steps - 1:
@@ -613,7 +555,6 @@ class Dreamer:
             else:
                 obs = next_obs
 
-        flush()
         return np.array(seed_episode_rews)
 
     def save(self, save_path):
@@ -901,30 +842,24 @@ def main():
             obs_shape, torch.optim.Adam, device=device, normalize_representations=args.normalize_representations
         )
 
-        if args.skip_sdm_train:
-            if not args.distance_model_path:
-                raise ValueError("--skip-sdm-train requires --distance-model-path")
-            state_distance_model.load(args.distance_model_path)
-            print(f"Loaded state distance model from {args.distance_model_path}")
-        else:
-            print("Start state distance learning process.")
-            num_state_distance_steps = 100000
-            _ = dreamer.collect_random_episodes(
-                train_env, num_state_distance_steps // args.action_repeat
-            )
+        print("Start state distance learning process.")
+        num_state_distance_steps = 100000
+        _ = dreamer.collect_random_episodes(
+            train_env, num_state_distance_steps // args.action_repeat
+        )
 
-            print("Start training state distance model.")
-            
-            state_distance_model.train(dreamer.data_buffer.get_data(), args.seed)
-            print("normalize:", state_distance_model._normalize_representations,
-                  "mean_t set:", state_distance_model._repr_mean_t is not None,
-                  "std_t set:", state_distance_model._repr_std_t is not None)
+        print("Start training state distance model.")
+        
+        state_distance_model.train(dreamer.data_buffer.get_data(), args.seed)
+        print("normalize:", state_distance_model._normalize_representations,
+                "mean set:", state_distance_model._repr_mean_t is not None,
+                "std set:", state_distance_model._repr_std_t is not None)
 
-            ckpt_dir = os.path.join(logdir, "ckpts/")
-            if not (os.path.exists(ckpt_dir)):
-                os.makedirs(ckpt_dir)
-            state_distance_model.save(ckpt_dir)
-            print("Finish state distance learning process.")
+        ckpt_dir = os.path.join(logdir, "ckpts/")
+        if not (os.path.exists(ckpt_dir)):
+            os.makedirs(ckpt_dir)
+        state_distance_model.save(ckpt_dir)
+        print("Finish state distance learning process.")
 
         dreamer = Dreamer(
             args,
@@ -991,16 +926,13 @@ def main():
                 loca_phase = "phase_2"
                 train_env = make_env(args, loca_phase, "train")
                 test_env = make_env(args, loca_phase, "eval")
-                
-                # Start streaming stats accumulation for p2 reps
-                # For the first 1e5 p2 samples, normalization uses p1 _repr_mean_t/_repr_std_t 
-                # while you accumulate p2 stats into _repr_stat_*.
-                # After 1e5 p2 samples, finalize_representation_stats_accum() is called which 
-                # updates _repr_mean_t/_repr_std_t using accumualted p2 stats.   
-                dreamer.state_distance_model.reset_representation_stats_accum()
-                dreamer._p2_repstats_seen = 0
-                dreamer._p2_repstats_finalized = False
-                
+                _, phase2_obs = dreamer.act_and_collect_data(train_env, collect_steps=3e5, return_obs=True)
+                phase2_data = {
+                    "observation": (np.stack(phase2_obs).astype(np.float32) / 255.0 - 0.5),
+                    "terminal": np.zeros((len(phase2_obs),), dtype=np.float32),
+                }
+                dreamer.state_distance_model.learn_representation_stats(phase2_data)
+
                 # Recompute logdir + logger here so phase_2 results save in phase_2 dir
                 logdir = os.path.join(data_path, args.exp_name, str(args.seed), loca_phase)
                 os.makedirs(logdir, exist_ok=True)
@@ -1025,9 +957,8 @@ def main():
             for _ in range(args.update_steps):
                 model_loss, actor_loss, value_loss, model_loss_terms, rew_loss_stats, rew_stats= dreamer.train_one_batch()
 
-            collect_rep_stats = (loca_phase == "phase_2") and (not dreamer._p2_repstats_finalized)
             train_rews = dreamer.act_and_collect_data(
-                train_env, args.collect_steps // args.action_repeat, collect_rep_stats=collect_rep_stats
+                train_env, args.collect_steps // args.action_repeat
             )
 
             logs.update(
