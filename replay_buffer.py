@@ -149,6 +149,7 @@ class ReplayBuffer:
         bits = (dots >= 0).to(torch.int64)  # (B, 32) in {0,1}
 
         # bit 0 = least significant bit (LSB) (matches "little" convention)
+        assert self.hash_bits == 32, "key_u32 packing only supports 32 bits right now"
         weights = (1 << torch.arange(32, device=rep_t.device, dtype=torch.int64))  # (32,)
         keys = (bits * weights).sum(dim=-1)  # (B,) int64, values < 2^32
         return keys

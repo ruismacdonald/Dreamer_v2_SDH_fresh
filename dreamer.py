@@ -548,22 +548,63 @@ class Dreamer:
         return episode_rew, np.array(video_images[: self.args.max_videos_to_save])
 
     def collect_random_episodes(self, env, seed_steps):
-
         obs = env.reset()
         done = False
         seed_episode_rews = [0.0]
+
+        if not self.loca_state_distance:
+            # plain buffer path
+            for i in range(seed_steps):
+                action = env.action_space.sample()
+                next_obs, rew, done, _ = env.step(action)
+                self.data_buffer.add(obs, action, rew, done)
+                seed_episode_rews[-1] += rew
+                if done:
+                    obs = env.reset()
+                    if i != seed_steps - 1:
+                        seed_episode_rews.append(0.0)
+                    done = False
+                else:
+                    obs = next_obs
+            return np.array(seed_episode_rews)
+
+        # AE path: batch like act_and_collect_data
+        B = 64
+        imgs, trans = [], []
+
+        def flush():
+            if len(imgs) == 0:
+                return
+            img_t = torch.from_numpy(np.stack(imgs)).to(self.device).float()
+            if img_t.ndim == 4 and img_t.shape[-1] in (1, 3):
+                img_t = img_t.permute(0, 3, 1, 2)
+            img_t = img_t / 255.0 - 0.5
+
+            with torch.no_grad():
+                reps_t = self.state_distance_model.get_representation_torch(img_t)  # (B,D)
+                self.data_buffer._ensure_simhash_matrix(reps_t)
+                keys_t = self.data_buffer._simhash_key_u32(reps_t, self.data_buffer.A_latent_t)
+                keys = keys_t.cpu().tolist()
+
+            for (o, a, r, d), k in zip(trans, keys):
+                self.data_buffer.add(o, a, r, d, key_u32=k)
+
+            imgs.clear()
+            trans.clear()
 
         for i in range(seed_steps):
             action = env.action_space.sample()
             next_obs, rew, done, _ = env.step(action)
 
-            rep = None
-            if self.loca_state_distance:
-                img = to_bchw(obs["image"]).to(self.device)
-                rep = self.state_distance_model.get_representation_torch(preprocess_obs(img))
-                
-            self.data_buffer.add(obs, action, rew, done, rep)
+            img = obs["image"].copy()
+            imgs.append(img)
+            trans.append(({"image": img}, action, rew, done))
+
+            if len(imgs) == B:
+                flush()
+
             seed_episode_rews[-1] += rew
+
             if done:
                 obs = env.reset()
                 if i != seed_steps - 1:
@@ -572,6 +613,7 @@ class Dreamer:
             else:
                 obs = next_obs
 
+        flush()
         return np.array(seed_episode_rews)
 
     def save(self, save_path):

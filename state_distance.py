@@ -286,6 +286,10 @@ class SimpleContrastiveStateDistanceModel:
 
     @torch.no_grad()
     def get_representation_torch(self, obs_bchw: torch.Tensor) -> torch.Tensor:
+        assert obs_bchw.dtype == torch.float32
+        assert obs_bchw.ndim == 4  # BCHW
+        assert obs_bchw.min() >= -0.6 and obs_bchw.max() <= 0.6
+
         # obs_bchw: (B,C,H,W) float32 on device
         self._representation_net.eval()
         reps = self._representation_net(obs_bchw)
