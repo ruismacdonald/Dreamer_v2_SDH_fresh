@@ -7,10 +7,11 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class ContrastiveStateDistanceDataset(Dataset):
-    def __init__(self, observation_pairs, num_negative_samples=128, transform=None):
+    def __init__(self, observation_pairs, num_negative_samples=128, seed=0,transform=None):
         self.data = observation_pairs
         self.num_negative_samples = num_negative_samples
         self.transform = transform
+        self._rng = np.random.default_rng(seed)
 
     def __len__(self):
         return len(self.data)
@@ -23,7 +24,7 @@ class ContrastiveStateDistanceDataset(Dataset):
 
         # TODO use a proper seeding
         # indices = self._rng.integers(len(self.data), size=self.num_negative_samples)
-        indices = np.random.randint(len(self.data), size=self.num_negative_samples)
+        indices = self._rng.integers(len(self.data), size=self.num_negative_samples)
         negatives = np.array([self.data[ind][0] for ind in indices])
 
         return obs, positive, negatives
@@ -98,6 +99,7 @@ class SimpleContrastiveStateDistanceModel:
         self,
         in_dim,
         optimizer_fn,
+        seed,
         init_fn=torch.nn.init.kaiming_uniform_,
         negative_distance_target=50.0,
         negative_loss_ratio=0.1,
@@ -130,6 +132,8 @@ class SimpleContrastiveStateDistanceModel:
         self._repr_mean = None
         self._repr_std = None
 
+        self._seed = int(seed)
+
     def prepare_train_loader(self, data):
         observation_pairs = []
         for i in range(data["observation"].shape[0] - 1):
@@ -139,38 +143,53 @@ class SimpleContrastiveStateDistanceModel:
                 (data["observation"][i], data["observation"][i + 1])
             )
         train_dataset = ContrastiveStateDistanceDataset(
-            observation_pairs, self._num_negative_samples
+            observation_pairs, num_negative_samples=self._num_negative_samples, seed=self._seed
         )
         return DataLoader(train_dataset, batch_size=self._batch_size, shuffle=True)
 
-    def calculate_loss(self, obs, positive, negatives):
+    def calculate_loss_terms(self, obs, positive, negatives):
         obs_repr = self._representation_net(obs)
-        positive_repr = self._representation_net(positive)
-        negatives_repr = self._representation_net(
-            negatives.view(
-                (negatives.shape[0] * negatives.shape[1], *negatives.shape[2:])
-            )
-        )
-        negatives_repr = negatives_repr.view(
-            (negatives.shape[0], negatives.shape[1], *negatives_repr.shape[1:])
-        ).permute((1, 0, 2))
+        pos_repr = self._representation_net(positive)
 
-        loss = (obs_repr - positive_repr).pow(2).sum()
-        loss += (
-            self._negative_loss_ratio
-            * (
-                self._negative_distance_target
-                - (obs_repr - negatives_repr).pow(2).sum(dim=[0, 2]).mean()
-            )
-            ** 2
+        neg_repr = self._representation_net(
+            negatives.view(negatives.shape[0] * negatives.shape[1], *negatives.shape[2:])
         )
-        return loss
+        neg_repr = neg_repr.view(
+            negatives.shape[0], negatives.shape[1], *neg_repr.shape[1:]
+        ).permute(1, 0, 2)  # (K, B, D)
+
+        # positive term
+        pos_dist2 = (obs_repr - pos_repr).pow(2).sum(dim=1)   # (B,)
+        pos_term = pos_dist2.mean()
+
+        # negative term
+        neg_dist2 = (obs_repr.unsqueeze(0) - neg_repr).pow(2).sum(dim=2)  # (K,B)
+        neg_mean = neg_dist2.mean()
+        neg_term = ((self._negative_distance_target - neg_mean) ** 2)
+
+        loss = pos_term + self._negative_loss_ratio * neg_term
+
+        # collapse-ish diagnostics
+        obs_norm = obs_repr.norm(dim=1).mean()
+        obs_std  = obs_repr.std(dim=0).mean()
+
+        stats = {
+            "sdm_pos_term": float(pos_term.detach().cpu().item()),
+            "sdm_neg_mean_dist2": float(neg_mean.detach().cpu().item()),
+            "sdm_neg_term": float(neg_term.detach().cpu().item()),
+            "sdm_loss": float(loss.detach().cpu().item()),
+            "sdm_repr_norm_mean": float(obs_norm.detach().cpu().item()),
+            "sdm_repr_std_mean": float(obs_std.detach().cpu().item()),
+        }
+        return loss, stats
 
     def train(self, buffer_data):
         train_loader = self.prepare_train_loader(buffer_data)
         self._representation_net.train()
         for _ in range(self._num_training_epochs):
-            running_loss, dataset_size = 0, 0
+            running = {}
+            count = 0
+
             for i, data in enumerate(train_loader, 0):
                 obs, positive, negatives = (
                     data[0].float().to(self._device),
@@ -178,32 +197,68 @@ class SimpleContrastiveStateDistanceModel:
                     data[2].float().to(self._device),
                 )
                 self._optimizer.zero_grad()
-                loss = self.calculate_loss(obs, positive, negatives)
+                loss, stats = self.calculate_loss_terms(obs, positive, negatives)
                 loss.backward()
                 self._optimizer.step()
 
-                running_loss += loss.item() * obs.shape[0]
-                dataset_size += obs.shape[0]
+                bs = obs.shape[0]
+                for k, v in stats.items():
+                    running[k] = running.get(k, 0.0) + v * bs
+                count += bs
 
-            # TODO log things somehow :D
+            epoch_stats = {k: v / max(count, 1) for k, v in running.items()}
+            # store/print/return these
 
         self._representation_net.eval()
-        self.learn_representation_stats(buffer_data)
+        sdm_out_stats = self.learn_representation_stats(buffer_data)
+
+        return {
+            **epoch_stats,
+            **sdm_out_stats,
+            "sdm_repr_mean_set": float(self._repr_mean is not None),
+            "sdm_repr_std_set": float(self._repr_std is not None),
+            "sdm_repr_mean_abs_mean": float(np.mean(np.abs(self._repr_mean))) if self._repr_mean is not None else 0.0,
+            "sdm_repr_std_mean": float(np.mean(self._repr_std)) if self._repr_std is not None else 0.0,
+        }
 
     @torch.no_grad()
     def learn_representation_stats(self, data):
         """Compute mean/std of representations for normalization."""
-        if not self._normalize_representations:
-            return
-
         obs = torch.as_tensor(data["observation"], device=self._device).float()
         if obs.ndim == 4 and obs.shape[-1] in (1, 3):
             obs = obs.permute(0, 3, 1, 2)
 
         self._representation_net.eval()
-        reprs = self._representation_net(obs).detach().cpu().numpy()
-        self._repr_mean = reprs.mean(axis=0)
-        self._repr_std = reprs.std(axis=0) + 1e-8
+        reprs = self._representation_net(obs).detach().cpu().numpy()  # (N, D)
+
+        stats = {
+            "sdm_out_min": float(reprs.min()),
+            "sdm_out_max": float(reprs.max()),
+            "sdm_out_mean": float(reprs.mean()),
+            "sdm_out_std": float(reprs.std()),
+            "sdm_out_abs_mean": float(np.mean(np.abs(reprs))),
+            "sdm_out_p01": float(np.quantile(reprs, 0.01)),
+            "sdm_out_p50": float(np.quantile(reprs, 0.50)),
+            "sdm_out_p99": float(np.quantile(reprs, 0.99)),
+            "sdm_out_norm_mean": float(np.mean(np.linalg.norm(reprs, axis=1))),
+            "sdm_out_norm_p99": float(np.quantile(np.linalg.norm(reprs, axis=1), 0.99)),
+        }
+
+        if self._normalize_representations:
+            self._repr_mean = reprs.mean(axis=0)
+            self._repr_std = reprs.std(axis=0) + 1e-8
+
+            z = (reprs - self._repr_mean) / self._repr_std
+            stats.update({
+                "sdm_out_normed_min": float(z.min()),
+                "sdm_out_normed_max": float(z.max()),
+                "sdm_out_normed_mean": float(z.mean()),
+                "sdm_out_normed_std": float(z.std()),
+                "sdm_out_normed_p01": float(np.quantile(z, 0.01)),
+                "sdm_out_normed_p99": float(np.quantile(z, 0.99)),
+            })
+
+        return stats
 
     @torch.no_grad()
     def get_representation(self, obs):

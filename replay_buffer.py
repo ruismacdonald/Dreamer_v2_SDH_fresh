@@ -285,14 +285,15 @@ class ReplayBuffer:
         }
 
     def get_data(self):
-        observations = torch.as_tensor(self.observations[: self.idx].copy().astype(np.float32))
+        N = self.size if self.full else self.idx
+        observations = torch.as_tensor(self.observations[: N].copy().astype(np.float32))
         # uint8 [0,255] -> float32 [-0.5, 0.5]
         observations = observations.to(torch.float32) / 255.0 - 0.5
         observations = observations.detach().cpu().numpy()
 
         data = {
             "observation": observations,
-            "terminal": self.terminals[: self.idx].copy(),
+            "terminal": self.terminals[: N].copy(),
         }
         if self.distance_process:
             data.update({"loca_indices_flat": self.loca_indices_flat.copy()})
