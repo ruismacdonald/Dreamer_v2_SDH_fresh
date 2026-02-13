@@ -225,10 +225,8 @@ class ReplayBuffer:
         Standard Dreamer sampling from the global ring.
         
         Dreamer valid-sequence guard:
-        - self.idx is the next write position.
-        - It must NOT appear in idxs[1:], otherwise the sampled sequence crosses the write boundary
-        and may include invalid/overwritten data.
-        - Starting exactly at self.idx is allowed; crossing over it is not.
+        self.idx (the next write slot) must not appear in idxs[1:].
+        Otherwise the sequence crosses the write boundary and may include invalid/overwritten data.
         """
 
         # If the buffer is NOT full yet, only indices [0, self.idx) have valid written data.
