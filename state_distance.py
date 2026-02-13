@@ -11,7 +11,6 @@ class ContrastiveStateDistanceDataset(Dataset):
         self.data = observation_pairs
         self.num_negative_samples = num_negative_samples
         self.transform = transform
-        self._rng = np.random.default_rng(seed)
 
     def __len__(self):
         return len(self.data)
@@ -23,8 +22,7 @@ class ContrastiveStateDistanceDataset(Dataset):
         obs, positive = self.data[idx]
 
         # TODO use a proper seeding
-        # indices = self._rng.integers(len(self.data), size=self.num_negative_samples)
-        indices = self._rng.integers(len(self.data), size=self.num_negative_samples)
+        indices = np.random.randint(len(self.data), size=self.num_negative_samples)
         negatives = np.array([self.data[ind][0] for ind in indices])
 
         return obs, positive, negatives
@@ -188,11 +186,11 @@ class SimpleContrastiveStateDistanceModel:
         )
 
 
-    def calculate_loss_terms(self, obs_f, pos_f, neg_f):
+    def calculate_loss_terms(self, obs, positive, negatives):
         """
-        obs_f: (B,3,64,64) float in [-0.5, 0.5]
-        pos_f: (B,3,64,64) float in [-0.5, 0.5]
-        neg_f: (B,K,3,64,64) float in [-0.5, 0.5]
+        obs: (B,3,64,64) float in [-0.5, 0.5]
+        positive: (B,3,64,64) float in [-0.5, 0.5]
+        negatives: (B,K,3,64,64) float in [-0.5, 0.5]
 
         Positive term: Compute the squared distance between the embedding of the current observation 
         and its true next (consecutive) observation. Minimizing this term encourages temporally 
@@ -203,33 +201,31 @@ class SimpleContrastiveStateDistanceModel:
         model if this average distance is not close to a predefined target. This pushes unrelated 
         states apart and prevents representation collapse.
         """
-        obs_repr = self._representation_net(obs_f)  # (B,D)
-        pos_repr = self._representation_net(pos_f)  # (B,D)
+        # Reprs
+        obs_repr = self._representation_net(obs)  # (B,D)
+        pos_repr = self._representation_net(positive)  # (B,D)
 
-        B, K = neg_f.shape[0], neg_f.shape[1]
-        neg_flat = neg_f.reshape(B * K, *neg_f.shape[2:])  # (B*K,3,64,64)
-        neg_repr = self._representation_net(neg_flat)  # (B*K,D)
+        B, K = negatives.shape[0], negatives.shape[1]
+        neg_repr = self._representation_net(
+            negatives.view(B * K, *negatives.shape[2:])  # (B*K,C,H,W)
+        )
         neg_repr = neg_repr.view(B, K, -1).permute(1, 0, 2)  # (K,B,D)
 
-        # Positive term
-        pos_dist2 = (obs_repr - pos_repr).pow(2).sum(dim=1)  # (B,)
-        pos_term = pos_dist2.mean()
+        # Loss
+        pos_term = (obs_repr - pos_repr).pow(2).sum()
+        neg_mean_dist = (obs_repr - neg_repr).pow(2).sum(dim=[0, 2]).mean()
+        neg_term = self._negative_loss_ratio * (self._negative_distance_target - neg_mean_dist).pow(2)
 
-        # Negative term
-        neg_dist2 = (obs_repr.unsqueeze(0) - neg_repr).pow(2).sum(dim=2)  # (K,B)
-        neg_mean = neg_dist2.mean()
-        neg_term = (self._negative_distance_target - neg_mean).pow(2)
+        loss = pos_term + neg_term
 
-        loss = pos_term + self._negative_loss_ratio * neg_term
-
+        # Stats (extra, doesn’t affect gradients)
         obs_norm = obs_repr.norm(dim=1).mean()
         obs_std = obs_repr.std(dim=0, unbiased=False).mean()
-
         stats = {
-            "sdm_pos_term": float(pos_term.detach().cpu().item()),
-            "sdm_neg_mean_dist2": float(neg_mean.detach().cpu().item()),
-            "sdm_neg_term": float(neg_term.detach().cpu().item()),
             "sdm_loss": float(loss.detach().cpu().item()),
+            "sdm_pos_term": float(pos_term.detach().cpu().item()),
+            "sdm_neg_mean_dist": float(neg_mean_dist.detach().cpu().item()),
+            "sdm_neg_term": float(neg_term.detach().cpu().item()),
             "sdm_repr_norm_mean": float(obs_norm.detach().cpu().item()),
             "sdm_repr_std_mean": float(obs_std.detach().cpu().item()),
             "sdm_obs_repr_min": float(obs_repr.min().detach().cpu().item()),

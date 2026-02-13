@@ -38,15 +38,19 @@ def preprocess_obs(obs):
     return obs
 
 def to_bchw(img) -> torch.Tensor:
-    # img is usually np.uint8 CHW (from env wrapper)
     if isinstance(img, np.ndarray):
-        t = torch.from_numpy(img)  # zero-copy CPU
+        t = torch.from_numpy(img)
     else:
         t = img
 
-    if t.ndim == 3:
-        t = t.unsqueeze(0)  # (1,C,H,W)
+    if t.ndim == 3 and t.shape[-1] in (1, 3) and t.shape[0] not in (1, 3):
+        # HWC -> CHW
+        t = t.permute(2, 0, 1)
 
+    if t.ndim == 3:
+        t = t.unsqueeze(0)
+
+    assert t.ndim == 4 and t.shape[1] in (1,3), f"Expected BCHW with C in (1,3), got {tuple(t.shape)}"
     return t
 
 
@@ -788,9 +792,6 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
     else:
         device = torch.device("cpu")
-
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
     train_env = make_env(args, loca_phase, "train")
     test_env = make_env(args, loca_phase, "eval")
