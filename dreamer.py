@@ -34,7 +34,7 @@ def make_env(args, loca_phase="phase_1", loca_mode="train"):
     return env
 
 def preprocess_obs(obs):
-    obs = obs / 255.0 - 0.5
+    obs = obs.to(torch.float32) / 255.0 - 0.5
     return obs
 
 def to_bchw(img) -> torch.Tensor:
