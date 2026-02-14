@@ -8,13 +8,13 @@
 #SBATCH --mem=32G
 #SBATCH --array=0
 #SBATCH --acctg-freq=task=1
-#SBATCH --output=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/randomizedreacherloca_v2_state_dist/%A-%a.out
-#SBATCH --error=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/randomizedreacherloca_v2_state_dist/%A-%a.err
+#SBATCH --output=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/randomizedreacherloca_v2_state_dist/%A-%a.out
+#SBATCH --error=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/randomizedreacherloca_v2_state_dist/%A-%a.err
 
 set -e -o pipefail
 
 # Top-level results dir on Lustre
-BASE_SAVE_DIR="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/randomizedreacherloca_v2_state_dist"
+BASE_SAVE_DIR="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/randomizedreacherloca_v2_state_dist"
 mkdir -p "$BASE_SAVE_DIR"
 
 # Gentle stagger so all tasks don’t hammer Lustre at once
@@ -60,7 +60,7 @@ export OMP_PLACES=cores
 export SLURM_CPU_BIND=cores
 
 # Source code
-DREAMER_SRC="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh"
+DREAMER_SRC="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH"
 export PYTHONPATH="$DREAMER_SRC:${PYTHONPATH:-}"
 
 export LOCA_DATALOADER_WORKERS=0
