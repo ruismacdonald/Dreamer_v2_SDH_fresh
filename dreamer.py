@@ -38,6 +38,11 @@ def preprocess_obs(obs):
     return obs
 
 def to_bchw(img) -> torch.Tensor:
+    """
+    Accepts np array or torch tensor.
+    Returns float32 torch tensor with shape (1, C, H, W).
+    Handles HWC -> CHW if needed.
+    """
     if not isinstance(img, torch.Tensor):
         img = torch.tensor(img)
 
@@ -50,7 +55,7 @@ def to_bchw(img) -> torch.Tensor:
         img = img.unsqueeze(0)
 
     # Now should be BCHW
-    return img
+    return img.to(torch.float32)
 
 
 class Dreamer:
@@ -370,15 +375,17 @@ class Dreamer:
     def train_one_batch(self):
 
         obs, acs, rews, terms, reward_mask = self.data_buffer.sample()
-
-        obs = torch.from_numpy(obs).to(self.device, non_blocking=True)  # uint8 on GPU
-        acs = torch.from_numpy(acs).to(self.device, non_blocking=True)  # float32 already
-        rews = torch.from_numpy(rews).to(self.device, non_blocking=True).unsqueeze(-1)
-        nonterms = torch.from_numpy(1.0 - terms).to(self.device, non_blocking=True).unsqueeze(-1)
-        reward_mask = torch.from_numpy(reward_mask).to(self.device, non_blocking=True).unsqueeze(-1)
-
-        assert reward_mask.shape[0] == self.args.train_seq_len
-        assert reward_mask.shape[1] == self.args.batch_size
+        obs = torch.tensor(obs, dtype=torch.float32).to(self.device)
+        acs = torch.tensor(acs, dtype=torch.float32).to(self.device)
+        rews = torch.tensor(rews, dtype=torch.float32).to(self.device).unsqueeze(-1)
+        nonterms = (
+            torch.tensor((1.0 - terms), dtype=torch.float32)
+            .to(self.device)
+            .unsqueeze(-1)
+        )
+        reward_mask = (
+            torch.tensor(reward_mask, dtype=torch.float32).to(self.device).unsqueeze(-1)
+        )
 
         model_loss, model_loss_terms, rew_loss_stats = self.world_model_loss(obs, acs, rews, nonterms, reward_mask)
         self.world_model_opt.zero_grad()
@@ -411,7 +418,7 @@ class Dreamer:
 
     def act_with_world_model(self, obs, prev_state, prev_action, explore=False):
 
-        img = to_bchw(obs["image"]).to(self.device, non_blocking=True)
+        img = to_bchw(obs["image"]).to(self.device)
         obs_embed = self.obs_encoder(preprocess_obs(img))
         _, posterior = self.rssm.observe_step(prev_state, prev_action, obs_embed)
         features = torch.cat([posterior["stoch"], posterior["deter"]], dim=-1)
@@ -804,7 +811,7 @@ def main():
 
     if args.loca_state_distance:
         state_distance_model = SimpleContrastiveStateDistanceModel(
-            obs_shape, torch.optim.Adam, device=device, normalize_representations=args.normalize_representations, seed=args.seed
+            obs_shape, torch.optim.Adam, device=device, normalize_representations=args.normalize_representations
         )
 
         print("Start state distance learning process.")

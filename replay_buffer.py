@@ -287,8 +287,13 @@ class ReplayBuffer:
         }
 
     def get_data(self):
+        observations = torch.as_tensor(self.observations[: self.idx].copy().astype(np.float32))
+        # uint8 [0,255] -> float32 [-0.5, 0.5]
+        observations = observations.to(torch.float32) / 255.0 - 0.5
+        observations = observations.detach().cpu().numpy()
+
         data = {
-            "observation": self.observations[: self.idx].copy(),  # uint8 CHW
+            "observation": observations,
             "terminal": self.terminals[: self.idx].copy(),
         }
         if self.distance_process:
