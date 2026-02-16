@@ -1,3 +1,4 @@
+from html import parser
 import os
 import random
 import time
@@ -824,10 +825,10 @@ def main():
         
         sdm_stats = state_distance_model.train(dreamer.data_buffer.get_data())
         logger.log_scalars(sdm_stats, step=dreamer.data_buffer.steps * args.action_repeat)
-        logger.flush()
+
         print("normalize:", state_distance_model._normalize_representations,
-                "mean set:", state_distance_model._repr_mean is not None,
-                "std set:", state_distance_model._repr_std is not None)
+              "mean set:", state_distance_model._repr_mean is not None,
+              "std set:", state_distance_model._repr_std is not None)
 
         ckpt_dir = os.path.join(logdir, "ckpts/")
         if not (os.path.exists(ckpt_dir)):
@@ -1001,3 +1002,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        

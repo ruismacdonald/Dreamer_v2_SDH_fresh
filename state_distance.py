@@ -32,21 +32,9 @@ class ContrastiveStateDistanceDataset(Dataset):
 def calculate_output_dim(net, input_shape):
     if isinstance(input_shape, int):
         input_shape = (input_shape,)
-    placeholder = torch.zeros((1,) + tuple(input_shape))
+    placeholder = torch.zeros((0,) + tuple(input_shape))
     output = net(placeholder)
     return output.size()[1:]
-
-
-def tstats(x: torch.Tensor, prefix: str) -> dict:
-    x = x.detach()
-    return {
-        f"{prefix}_shape0": float(x.shape[0]),
-        f"{prefix}_dtype": str(x.dtype),
-        f"{prefix}_min": float(x.min().item()),
-        f"{prefix}_max": float(x.max().item()),
-        f"{prefix}_mean": float(x.float().mean().item()),
-        f"{prefix}_std": float(x.float().std(unbiased=False).item()),
-    }
 
 
 def _accum_numeric(running: dict, stats: dict, weight: int):
@@ -65,11 +53,6 @@ def _accum_numeric(running: dict, stats: dict, weight: int):
             continue
 
         running[k] = running.get(k, 0.0) + float(v) * weight
-
-
-def preprocess_uint8_batch(x: torch.Tensor) -> torch.Tensor:
-    # x: uint8 BCHW
-    return x.to(torch.float32).div_(255.0).sub_(0.5)
 
 
 class ContrastiveStateDistanceNet(nn.Module):
@@ -193,9 +176,8 @@ class SimpleContrastiveStateDistanceModel:
         model if this average distance is not close to a predefined target. This pushes unrelated 
         states apart and prevents representation collapse.
         """
-        # Reprs
-        obs_repr = self._representation_net(obs)  # (B,D)
-        positive_repr = self._representation_net(positive)  # (B,D)
+        obs_repr = self._representation_net(obs)
+        positive_repr = self._representation_net(positive)
         negatives_repr = self._representation_net(
             negatives.view(
                 (negatives.shape[0] * negatives.shape[1], *negatives.shape[2:])
@@ -216,17 +198,19 @@ class SimpleContrastiveStateDistanceModel:
         )
 
         # Stats (extra, doesn’t affect gradients)
-        obs_norm = obs_repr.norm(dim=1).mean()
-        obs_std = obs_repr.std(dim=0, unbiased=False).mean()
-        stats = {
-            "sdm_loss": float(loss.detach().cpu().item()),
-            "sdm_repr_norm_mean": float(obs_norm.detach().cpu().item()),
-            "sdm_repr_std_mean": float(obs_std.detach().cpu().item()),
-            "sdm_obs_repr_min": float(obs_repr.min().detach().cpu().item()),
-            "sdm_obs_repr_max": float(obs_repr.max().detach().cpu().item()),
-        }
+        with torch.no_grad():
+            t = obs_repr
+            obs_norm = t.norm(dim=1).mean()
+            obs_std  = t.std(dim=0, unbiased=False).mean()
+            stats = {
+                "sdm_loss": float(loss.item()),
+                "sdm_repr_norm_mean": float(obs_norm.cpu().item()),
+                "sdm_repr_std_mean": float(obs_std.cpu().item()),
+                "sdm_obs_repr_min": float(t.min().cpu().item()),
+                "sdm_obs_repr_max": float(t.max().cpu().item()),
+            }
+        
         return loss, stats
-
 
     def train(self, buffer_data):
         train_loader = self.prepare_train_loader(buffer_data)
@@ -240,7 +224,6 @@ class SimpleContrastiveStateDistanceModel:
 
         for _ in range(self._num_training_epochs):
             running_loss, dataset_size = 0, 0
-
             for i, data in enumerate(train_loader, 0):
                 obs, positive, negatives = (
                     data[0].float().to(self._device),
@@ -252,13 +235,12 @@ class SimpleContrastiveStateDistanceModel:
                 loss.backward()
                 self._optimizer.step()
 
-                B = int(obs.shape[0])
-                running_loss += float(loss.detach().item()) * B
-                dataset_size += B
+                running_loss += loss.item() * obs.shape[0]
+                dataset_size += obs.shape[0]
 
                 # Weighted accumulate numeric stats
-                _accum_numeric(running_stats, batch_stats, weight=B)
-                stats_weight += B
+                _accum_numeric(running_stats, batch_stats, weight=int(obs.shape[0]))
+                stats_weight += int(obs.shape[0])
 
             avg_loss = running_loss / max(dataset_size, 1)
             epoch_losses.append(avg_loss)
@@ -301,9 +283,7 @@ class SimpleContrastiveStateDistanceModel:
 
     @torch.no_grad()
     def learn_representation_stats(self, data):
-        """
-        Compute mean/std of representations for normalization.
-        """
+        """Compute mean/std of representations for normalization."""
         obs = torch.as_tensor(data["observation"], device=self._device).float()
         if obs.ndim == 4 and obs.shape[-1] in (1, 3):
             obs = obs.permute(0, 3, 1, 2)

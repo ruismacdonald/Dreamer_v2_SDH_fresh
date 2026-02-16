@@ -76,10 +76,6 @@ class ReplayBuffer:
         self.insert_id = np.zeros(self.size, dtype=np.int64)  # generation stamp per slot
         self._global_insert_id = 0
 
-        # # Use a dedicated RNG so we never call np.random.choice() on a Python list
-        # # (np.random.choice(list) converts list -> array each call, which is slow).
-        # self._rng = np.random.default_rng(seed)
-
         # SimHash-bucketed state
         if self.distance_process:
             self.hash_bits = int(obs_hash_size)  # SimHash bits
@@ -219,7 +215,7 @@ class ReplayBuffer:
         self.episodes += (1 if done else 0)
 
     # Sampling
-    
+
     def _sample_idx(self, L):
         """Standard Dreamer sampling from the global ring."""
         valid_idx = False
@@ -228,8 +224,9 @@ class ReplayBuffer:
             idxs = np.arange(idx, idx + L) % self.size
             valid_idx = self.idx not in idxs[1:]
         return idxs
-
+    
     def _sample_idx_distance(self, L: int):
+        """Distance-process sampling: choose START from currently-kept indices, then return temporal window."""
         if len(self.loca_indices_flat) == 0:
             raise RuntimeError("No kept indices available yet (loca_indices_flat is empty).")
 
@@ -237,6 +234,7 @@ class ReplayBuffer:
         while not valid_idx:
             start = int(np.random.choice(self.loca_indices_flat))
             idxs = (np.arange(start, start + L) % self.size).astype(np.int64)
+            # match original: don't cross the current write position in the middle of a sequence
             valid_idx = self.idx not in idxs[1:]
         return idxs
 
