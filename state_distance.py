@@ -37,24 +37,6 @@ def calculate_output_dim(net, input_shape):
     return output.size()[1:]
 
 
-def _accum_numeric(running: dict, stats: dict, weight: int):
-    for k, v in stats.items():
-        # allow numpy scalars
-        if isinstance(v, np.generic):
-            v = v.item()
-        # allow 0-d torch tensors
-        elif torch.is_tensor(v):
-            if v.numel() != 1:
-                continue
-            v = v.detach().cpu().item()
-
-        # skip non-numeric (e.g. "torch.uint8")
-        if not isinstance(v, (int, float, np.integer, np.floating)):
-            continue
-
-        running[k] = running.get(k, 0.0) + float(v) * weight
-
-
 class ContrastiveStateDistanceNet(nn.Module):
     def __init__(
         self,
@@ -162,20 +144,6 @@ class SimpleContrastiveStateDistanceModel:
         return DataLoader(train_dataset, batch_size=self._batch_size, shuffle=True)
 
     def calculate_loss(self, obs, positive, negatives):
-        """
-        obs: (B,3,64,64) float in [-0.5, 0.5]
-        positive: (B,3,64,64) float in [-0.5, 0.5]
-        negatives: (B,K,3,64,64) float in [-0.5, 0.5]
-
-        Positive term: Compute the squared distance between the embedding of the current observation 
-        and its true next (consecutive) observation. Minimizing this term encourages temporally 
-        adjacent states to have similar representations.
-
-        Negative term: Compute the average squared distance between the embedding of the current 
-        observation and a set of randomly sampled (non-consecutive) observations. Penalize the 
-        model if this average distance is not close to a predefined target. This pushes unrelated 
-        states apart and prevents representation collapse.
-        """
         obs_repr = self._representation_net(obs)
         positive_repr = self._representation_net(positive)
         negatives_repr = self._representation_net(
@@ -196,32 +164,11 @@ class SimpleContrastiveStateDistanceModel:
             )
             ** 2
         )
-
-        # Stats (extra, doesn’t affect gradients)
-        with torch.no_grad():
-            t = obs_repr
-            obs_norm = t.norm(dim=1).mean()
-            obs_std  = t.std(dim=0, unbiased=False).mean()
-            stats = {
-                "sdm_loss": float(loss.item()),
-                "sdm_repr_norm_mean": float(obs_norm.cpu().item()),
-                "sdm_repr_std_mean": float(obs_std.cpu().item()),
-                "sdm_obs_repr_min": float(t.min().cpu().item()),
-                "sdm_obs_repr_max": float(t.max().cpu().item()),
-            }
-        
-        return loss, stats
+        return loss
 
     def train(self, buffer_data):
         train_loader = self.prepare_train_loader(buffer_data)
         self._representation_net.train()
-
-        epoch_losses = []
-
-        # Aggregate stats across *all* batches (and epochs)
-        running_stats = {}
-        stats_weight = 0
-
         for _ in range(self._num_training_epochs):
             running_loss, dataset_size = 0, 0
             for i, data in enumerate(train_loader, 0):
@@ -231,94 +178,32 @@ class SimpleContrastiveStateDistanceModel:
                     data[2].float().to(self._device),
                 )
                 self._optimizer.zero_grad()
-                loss, batch_stats = self.calculate_loss(obs, positive, negatives)
+                loss = self.calculate_loss(obs, positive, negatives)
                 loss.backward()
                 self._optimizer.step()
 
                 running_loss += loss.item() * obs.shape[0]
                 dataset_size += obs.shape[0]
 
-                # Weighted accumulate numeric stats
-                _accum_numeric(running_stats, batch_stats, weight=int(obs.shape[0]))
-                stats_weight += int(obs.shape[0])
-
-            avg_loss = running_loss / max(dataset_size, 1)
-            epoch_losses.append(avg_loss)
-
-        # Finalize aggregated stats as weighted means
-        agg_stats = {}
-        if stats_weight > 0:
-            agg_stats = {k: v / stats_weight for k, v in running_stats.items()}
-        else:
-            agg_stats = {}  # no batches
+            # TODO log things somehow :D
 
         self._representation_net.eval()
-        learn_repr_stats = self.learn_representation_stats(buffer_data)
-
-        first_loss = float(epoch_losses[0]) if epoch_losses else 0.0
-        last_loss  = float(epoch_losses[-1]) if epoch_losses else 0.0
-        mean_loss  = float(np.mean(epoch_losses)) if epoch_losses else 0.0
-        min_loss   = float(np.min(epoch_losses)) if epoch_losses else 0.0
-        loss_delta = float(first_loss - last_loss)
-
-        repr_stats = {}
-        if self._repr_mean is not None:
-            repr_stats.update({
-                "sdm_repr_mean_abs_mean": float(np.mean(np.abs(self._repr_mean))),
-                "sdm_repr_std_mean": float(np.mean(self._repr_std)),
-            })
-
-        return {
-            "sdm_loss_first": first_loss,
-            "sdm_loss_last": last_loss,
-            "sdm_loss_mean": mean_loss,
-            "sdm_loss_min": min_loss,
-            "sdm_loss_delta": loss_delta,
-            "sdm_epochs": float(self._num_training_epochs),
-            "sdm_dataset_size": float(dataset_size),
-            **repr_stats,
-            **learn_repr_stats,
-            **agg_stats,
-        }
+        self.learn_representation_stats(buffer_data)
 
     @torch.no_grad()
     def learn_representation_stats(self, data):
         """Compute mean/std of representations for normalization."""
+        if not self._normalize_representations:
+            return
+
         obs = torch.as_tensor(data["observation"], device=self._device).float()
         if obs.ndim == 4 and obs.shape[-1] in (1, 3):
             obs = obs.permute(0, 3, 1, 2)
 
         self._representation_net.eval()
         reprs = self._representation_net(obs).detach().cpu().numpy()
-
-        stats = {
-            "sdm_out_min": float(reprs.min()),
-            "sdm_out_max": float(reprs.max()),
-            "sdm_out_mean": float(reprs.mean()),
-            "sdm_out_std": float(reprs.std()),
-            "sdm_out_abs_mean": float(np.mean(np.abs(reprs))),
-            "sdm_out_p01": float(np.quantile(reprs, 0.01)),
-            "sdm_out_p50": float(np.quantile(reprs, 0.50)),
-            "sdm_out_p99": float(np.quantile(reprs, 0.99)),
-            "sdm_out_norm_mean": float(np.mean(np.linalg.norm(reprs, axis=1))),
-            "sdm_out_norm_p99": float(np.quantile(np.linalg.norm(reprs, axis=1), 0.99)),
-        }
-
-        if self._normalize_representations:
-            self._repr_mean = reprs.mean(axis=0)
-            self._repr_std = reprs.std(axis=0) + 1e-8
-
-            z = (reprs - self._repr_mean) / self._repr_std
-            stats.update({
-                "sdm_out_normed_min": float(z.min()),
-                "sdm_out_normed_max": float(z.max()),
-                "sdm_out_normed_mean": float(z.mean()),
-                "sdm_out_normed_std": float(z.std()),
-                "sdm_out_normed_p01": float(np.quantile(z, 0.01)),
-                "sdm_out_normed_p99": float(np.quantile(z, 0.99)),
-            })
-
-        return stats
+        self._repr_mean = reprs.mean(axis=0)
+        self._repr_std = reprs.std(axis=0) + 1e-8
 
     @torch.no_grad()
     def get_representation(self, obs):

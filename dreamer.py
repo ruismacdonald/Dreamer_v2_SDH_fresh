@@ -823,12 +823,10 @@ def main():
 
         print("Start training state distance model.")
         
-        sdm_stats = state_distance_model.train(dreamer.data_buffer.get_data())
-        logger.log_scalars(sdm_stats, step=dreamer.data_buffer.steps * args.action_repeat)
-
+        state_distance_model.train(dreamer.data_buffer.get_data())
         print("normalize:", state_distance_model._normalize_representations,
-              "mean set:", state_distance_model._repr_mean is not None,
-              "std set:", state_distance_model._repr_std is not None)
+                "mean set:", state_distance_model._repr_mean is not None,
+                "std set:", state_distance_model._repr_std is not None)
 
         ckpt_dir = os.path.join(logdir, "ckpts/")
         if not (os.path.exists(ckpt_dir)):
@@ -847,9 +845,6 @@ def main():
         )
 
     if args.train:
-        logger.log_scalars({"train_avg_reward": 0.0, "eval_avg_reward": 0.0}, step=0)
-        logger.flush()
-        
         initial_logs = OrderedDict()
         seed_episode_rews = dreamer.collect_random_episodes(
             train_env, args.seed_steps // args.action_repeat
@@ -881,7 +876,7 @@ def main():
             }
         )
 
-        logger.log_scalars(initial_logs, step=global_step)
+        logger.log_scalars(initial_logs, step=0)
         logger.flush()
 
         while global_step <= total_steps:
@@ -1005,4 +1000,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
