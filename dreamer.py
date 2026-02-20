@@ -807,6 +807,9 @@ def main():
     obs_shape = train_env.observation_space["image"].shape
     action_size = train_env.action_space.shape[0]
     dreamer = Dreamer(args, obs_shape, action_size, device, args.restore)
+    # If resuming, force the step counter used by phase switching/logging
+    if args.restore and args.resume_steps > 0:
+        dreamer.data_buffer.steps = args.resume_steps // args.action_repeat
 
     logger = Logger(logdir)
 
@@ -815,24 +818,30 @@ def main():
             obs_shape, torch.optim.Adam, device=device, normalize_representations=args.normalize_representations
         )
 
-        print("Start state distance learning process.")
-        num_state_distance_steps = 100000
-        _ = dreamer.collect_random_episodes(
-            train_env, num_state_distance_steps // args.action_repeat
-        )
+        if args.skip_sdm_train:
+            if not args.distance_model_path:
+                raise ValueError("--skip-sdm-train requires --distance-model-path")
+            state_distance_model.load(args.distance_model_path)
+            print(f"Loaded state distance model from {args.distance_model_path}")
+        else:
+            print("Start state distance learning process.")
+            num_state_distance_steps = 100000
+            _ = dreamer.collect_random_episodes(
+                train_env, num_state_distance_steps // args.action_repeat
+            )
 
-        print("Start training state distance model.")
-        
-        state_distance_model.train(dreamer.data_buffer.get_data())
-        print("normalize:", state_distance_model._normalize_representations,
-                "mean set:", state_distance_model._repr_mean is not None,
-                "std set:", state_distance_model._repr_std is not None)
+            print("Start training state distance model.")
+            
+            state_distance_model.train(dreamer.data_buffer.get_data())
+            print("normalize:", state_distance_model._normalize_representations,
+                  "mean set:", state_distance_model._repr_mean is not None,
+                  "std set:", state_distance_model._repr_std is not None)
 
-        ckpt_dir = os.path.join(logdir, "ckpts/")
-        if not (os.path.exists(ckpt_dir)):
-            os.makedirs(ckpt_dir)
-        state_distance_model.save(ckpt_dir)
-        print("Finish state distance learning process.")
+            ckpt_dir = os.path.join(logdir, "ckpts/")
+            if not (os.path.exists(ckpt_dir)):
+                os.makedirs(ckpt_dir)
+            state_distance_model.save(ckpt_dir)
+            print("Finish state distance learning process.")
 
         dreamer = Dreamer(
             args,

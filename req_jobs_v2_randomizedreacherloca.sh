@@ -1,20 +1,20 @@
 #!/bin/bash
-#SBATCH --job-name=d_v2_sdh_rr
+#SBATCH --job-name=dreamer_randomizedreacherloca_v2_state_dist
 #SBATCH --account=def-rsdjjana
 #SBATCH --time=6-23:59:59
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --exclude=ng[11105,30708]
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --array=0
 #SBATCH --acctg-freq=task=1
-#SBATCH --output=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/randomizedreacherloca_v2_state_dist/%A-%a.out
-#SBATCH --error=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/randomizedreacherloca_v2_state_dist/%A-%a.err
+#SBATCH --output=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/randomizedreacherloca_v2_state_dist/%A-%a.out
+#SBATCH --error=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/randomizedreacherloca_v2_state_dist/%A-%a.err
 
 set -e -o pipefail
 
 # Top-level results dir on Lustre
-BASE_SAVE_DIR="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/randomizedreacherloca_v2_state_dist"
+BASE_SAVE_DIR="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh/results/randomizedreacherloca_v2_state_dist"
 mkdir -p "$BASE_SAVE_DIR"
 
 # Gentle stagger so all tasks don’t hammer Lustre at once
@@ -60,7 +60,7 @@ export OMP_PLACES=cores
 export SLURM_CPU_BIND=cores
 
 # Source code
-DREAMER_SRC="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH"
+DREAMER_SRC="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_fresh"
 export PYTHONPATH="$DREAMER_SRC:${PYTHONPATH:-}"
 
 export LOCA_DATALOADER_WORKERS=0
@@ -68,7 +68,7 @@ export LOCA_DATALOADER_WORKERS=0
 : "${SLURM_TMPDIR:=/tmp}"
 SEED="${SLURM_ARRAY_TASK_ID}"
 
-RUN_DIR="${SLURM_TMPDIR}/dreamer-v2-sdh-rr-${SLURM_JOB_ID:-0}-${SEED}"
+RUN_DIR="${SLURM_TMPDIR}/dreamer-v2-state_dist-${SLURM_JOB_ID:-0}-${SEED}"
 FINAL_DIR="${BASE_SAVE_DIR}/${SEED}"
 mkdir -p "$RUN_DIR" "$FINAL_DIR"
 
@@ -81,8 +81,8 @@ python -u "$DREAMER_SRC/dreamer.py" \
   --train \
   --loca-all-phases \
   --buffer-size 2500000 \
-  --loca-phase1-steps 1500000 \
-  --loca-phase2-steps 3500000 \
+  --loca-phase1-steps 1000000 \
+  --loca-phase2-steps 1500000 \
   --loca-phase3-steps 0 \
   --loca-state-distance \
   --loca-hash-size 32 \
