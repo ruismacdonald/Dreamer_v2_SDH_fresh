@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=d_v2_sdh_r_log
+#SBATCH --job-name=d_v2_sdh_r
 #SBATCH --account=def-rsdjjana
 #SBATCH --time=6-23:59:59
 #SBATCH --gres=gpu:1
@@ -8,13 +8,13 @@
 #SBATCH --mem=32G
 #SBATCH --array=0
 #SBATCH --acctg-freq=task=1
-#SBATCH --output=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_state_dist_log_revert/%A-%a.out
-#SBATCH --error=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_state_dist_log_revert/%A-%a.err
+#SBATCH --output=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_state_dist/%A-%a.out
+#SBATCH --error=/home/ruism/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_state_dist/%A-%a.err
 
 set -e -o pipefail
 
 # Top-level results dir on Lustre
-BASE_SAVE_DIR="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_state_dist_log_revert"
+BASE_SAVE_DIR="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH/results/reacherloca_v2_state_dist"
 mkdir -p "$BASE_SAVE_DIR"
 
 # Gentle stagger so all tasks don’t hammer Lustre at once
@@ -68,7 +68,7 @@ export LOCA_DATALOADER_WORKERS=0
 : "${SLURM_TMPDIR:=/tmp}"
 SEED="${SLURM_ARRAY_TASK_ID}"
 
-RUN_DIR="${SLURM_TMPDIR}/dreamer-v2-state_dist_log_revert-${SLURM_JOB_ID:-0}-${SEED}"
+RUN_DIR="${SLURM_TMPDIR}/dreamer-v2-state_dist-${SLURM_JOB_ID:-0}-${SEED}"
 FINAL_DIR="${BASE_SAVE_DIR}/${SEED}"
 mkdir -p "$RUN_DIR" "$FINAL_DIR"
 
@@ -77,7 +77,7 @@ cd "$RUN_DIR"
 python -u "$DREAMER_SRC/dreamer.py" \
   --env reacherloca-easy \
   --algo Dreamerv2 \
-  --exp-name reacherloca_v2_state_dist_log_revert \
+  --exp-name reacherloca_v2_state_dist \
   --train \
   --loca-all-phases \
   --buffer-size 2500000 \
