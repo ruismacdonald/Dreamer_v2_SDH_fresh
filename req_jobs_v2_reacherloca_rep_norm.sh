@@ -88,7 +88,7 @@ python -u "$DREAMER_SRC/dreamer.py" \
   --loca-hash-size 32 \
   --loca-hash-count 2000 \
   --kl-loss-coeff 0.1 \
-  --representation-norm \
+  --normalize-representation \
   --seed "${SEED}"
 
 rsync -a --partial --inplace --no-whole-file "$RUN_DIR/" "$FINAL_DIR/"
