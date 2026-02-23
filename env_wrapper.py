@@ -62,6 +62,7 @@ class DeepMindControl:
 
 
 class DMCLoCA(DeepMindControl):
+    # Supports only reacherloca task
     def __init__(
         self,
         name,
@@ -73,7 +74,7 @@ class DMCLoCA(DeepMindControl):
         loca_mode="train",
         one_way_wall_radius=0.1,
     ):
-        super().__init__(name, seed, random_targets=random_targets, size=size, camera=camera)
+        super().__init__(name, seed, random_targets=False, size=size, camera=camera)
         self._loca_phase = loca_phase
         self._loca_mode = loca_mode
 
