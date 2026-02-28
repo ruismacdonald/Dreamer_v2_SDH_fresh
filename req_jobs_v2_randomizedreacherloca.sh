@@ -60,7 +60,7 @@ export OMP_PLACES=cores
 export SLURM_CPU_BIND=cores
 
 # Source code
-DREAMER_SRC="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH_10_seeds"
+DREAMER_SRC="$HOME/projects/def-rsdjjana/ruism/Dreamer_v2_SDH"
 export PYTHONPATH="$DREAMER_SRC:${PYTHONPATH:-}"
 
 export LOCA_DATALOADER_WORKERS=0
